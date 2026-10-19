@@ -2,8 +2,9 @@ package io.quarkiverse.renarde.security;
 
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.security.Principal;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -26,6 +27,7 @@ import io.quarkiverse.renarde.configuration.RenardeConfig;
 import io.quarkiverse.renarde.impl.RenardeConfigBean;
 import io.quarkiverse.renarde.util.Flash;
 import io.quarkiverse.renarde.util.RedirectException;
+import io.quarkiverse.renarde.util.RenardeJWTAuthMechanism;
 import io.quarkus.security.identity.SecurityIdentity;
 import io.smallrye.jwt.build.Jwt;
 import io.vertx.core.http.HttpServerRequest;
@@ -44,8 +46,14 @@ public class RenardeSecurity {
     @ConfigProperty(name = "quarkus.oidc.authentication.cookie-suffix", defaultValue = "q_session")
     String oidcCookie;
 
-    @ConfigProperty(name = "quarkus.renarde.auth.location-cookie")
+    @ConfigProperty(name = "quarkus.http.root-path", defaultValue = "/")
+    String rootPath;
+
+    @ConfigProperty(name = "quarkus.renarde.auth.redirect.cookie")
     String locationCookie;
+
+    @ConfigProperty(name = "quarkus.renarde.auth.redirect.type")
+    RenardeConfig.RenardeAuthConfig.Redirect.Type redirectType;
 
     @Inject
     HttpServerRequest request;
@@ -79,13 +87,12 @@ public class RenardeSecurity {
         String token = Jwt.issuer(jwtIssuer)
                 .upn(user.userId())
                 .groups(roles)
-                // FIXME: config
-                .expiresIn(Duration.ofDays(10))
+                .expiresIn(renardeConfig.auth().tokenExpiration())
                 .innerSign().encrypt();
         // FIXME: expiry, auto-refresh?
         return new NewCookie.Builder(jwtCookie)
                 .value(token)
-                .path("/")
+                .path(cookiePath())
                 .sameSite(SameSite.LAX)
                 .httpOnly(true)
                 .build();
@@ -134,6 +141,8 @@ public class RenardeSecurity {
 
     public Response makeLogoutResponse() {
         try {
+            // Use "/" rather than the root-path directly, because Response.seeOther()
+            // already resolves relative URIs against quarkus.http.root-path
             return this.makeLogoutResponse(new URI("/"));
         } catch (URISyntaxException e) {
             // can't happen
@@ -149,26 +158,38 @@ public class RenardeSecurity {
         Set<String> tenants = tenantProvider.getTenants();
         List<NewCookie> cookies = new ArrayList<>(tenants.size() + 1);
         // Default tenant
-        cookies.add(invalidateCookie(oidcCookie));
-
+        if (request.getCookie(oidcCookie) != null) {
+            cookies.add(invalidateCookie(oidcCookie));
+        }
         // Named tenants
         for (String tenant : tenants) {
-            cookies.add(invalidateCookie(oidcCookie + "_" + tenant));
+            String cookieName = oidcCookie + "_" + tenant;
+            if (request.getCookie(cookieName) != null) {
+                cookies.add(invalidateCookie(cookieName));
+            }
         }
+
         // Manual
-        cookies.add(invalidateCookie(jwtCookie));
+        if (request.getCookie(jwtCookie) != null) {
+            cookies.add(invalidateCookie(jwtCookie));
+        }
+
+        // Remove the redirect cookie (if it exists)
+        if (request.getCookie(renardeConfig.auth().redirect().cookie()) != null) {
+            cookies.add(invalidateCookie(renardeConfig.auth().redirect().cookie()));
+        }
 
         return cookies.toArray(new NewCookie[0]);
     }
 
     public Response makeRedirectAfterLogin(URI uri) {
         Map<String, jakarta.ws.rs.core.Cookie> cookies = headers.getCookies();
-        jakarta.ws.rs.core.Cookie redirectCookie = cookies.get(renardeConfig.auth.locationCookie);
+        jakarta.ws.rs.core.Cookie redirectCookie = cookies.get(renardeConfig.auth().locationCookie());
         NewCookie newCookie = null;
         if (redirectCookie != null) {
             // consume it
             String value = redirectCookie.getValue();
-            newCookie = invalidateCookie(renardeConfig.auth.locationCookie);
+            newCookie = invalidateCookie(renardeConfig.auth().locationCookie());
             uri = URI.create(value);
         }
         ResponseBuilder response = Response.seeOther(uri);
@@ -194,9 +215,24 @@ public class RenardeSecurity {
             // in there being two, which is invalid HTTP
             response.headers().remove(HttpHeaders.LOCATION);
         }
-        ResponseBuilder builder = Response.seeOther(URI.create(config.getLoginPage()));
+
+        String redirectUri;
+        boolean locationCookieEnabled = redirectType == RenardeConfig.RenardeAuthConfig.Redirect.Type.cookie;
+        if (locationCookieEnabled) {
+            redirectUri = config.getLoginPage();
+        } else {
+            redirectUri = "%s?%s=%s".formatted(config.getLoginPage(), RenardeJWTAuthMechanism.REDIRECT_URI,
+                    URLEncoder.encode(request.absoluteURI(), StandardCharsets.UTF_8));
+        }
+
+        // Remove any redirect cookie set by the auth challenge (storeInitialLocation in getChallenge),
+        // since saveURICookie() will set it.
+        response.removeCookies(locationCookie, false);
+
+        ResponseBuilder builder = Response.seeOther(URI.create(redirectUri));
         builder.cookie(makeLogoutCookies());
-        builder.cookie(saveURICookie());
+        if (locationCookieEnabled)
+            builder.cookie(saveURICookie());
 
         flash.flash("message", message);
 
@@ -208,15 +244,20 @@ public class RenardeSecurity {
     }
 
     private NewCookie saveURICookie() {
-        return new NewCookie.Builder(locationCookie).path("/").value(request.absoluteURI()).secure(request.isSSL()).build();
+        return new NewCookie.Builder(locationCookie).path(cookiePath()).value(request.absoluteURI())
+                .secure(request.isSSL()).build();
     }
 
     public NewCookie invalidateCookie(String cookieName) {
-        return new NewCookie.Builder(cookieName).path("/").maxAge(0).build();
+        return new NewCookie.Builder(cookieName).path(cookiePath()).maxAge(0).build();
     }
 
     public boolean hasUserCookie() {
         return request.getCookie(jwtCookie) != null;
+    }
+
+    private String cookiePath() {
+        return renardeConfig.auth().scopeCookiesToRootPath() ? rootPath : "/";
     }
 
 }

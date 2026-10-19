@@ -1,5 +1,8 @@
 package io.quarkiverse.renarde.util;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+
 import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -8,7 +11,10 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 import io.netty.handler.codec.http.HttpHeaderNames;
+import io.quarkiverse.renarde.configuration.RenardeConfig;
+import io.quarkiverse.renarde.configuration.RenardeConfig.RenardeAuthConfig;
 import io.quarkiverse.renarde.impl.RenardeConfigBean;
+import io.quarkus.qute.TemplateGlobal;
 import io.quarkus.smallrye.jwt.runtime.auth.JWTAuthMechanism;
 import io.quarkus.smallrye.jwt.runtime.auth.SmallRyeJwtConfig;
 import io.quarkus.vertx.http.runtime.security.ChallengeData;
@@ -28,11 +34,23 @@ public class RenardeJWTAuthMechanism extends JWTAuthMechanism {
 
     private static final Logger log = Logger.getLogger(RenardeJWTAuthMechanism.class);
 
+    @TemplateGlobal
+    public final static String REDIRECT_URI = "redirect_uri";
+
     @Inject
     RenardeConfigBean config;
 
-    @ConfigProperty(name = "quarkus.renarde.auth.location-cookie")
+    @ConfigProperty(name = "quarkus.renarde.auth.redirect.cookie")
     String locationCookie;
+
+    @ConfigProperty(name = "quarkus.renarde.auth.redirect.type")
+    RenardeConfig.RenardeAuthConfig.Redirect.Type redirectType;
+
+    @Inject
+    RenardeConfig renardeConfig;
+
+    @ConfigProperty(name = "quarkus.http.root-path", defaultValue = "/")
+    String rootPath;
 
     // for CDI proxy
     RenardeJWTAuthMechanism() {
@@ -50,11 +68,11 @@ public class RenardeJWTAuthMechanism extends JWTAuthMechanism {
 
     protected void storeInitialLocation(final RoutingContext exchange) {
         exchange.response().addCookie(Cookie.cookie(locationCookie, exchange.request().absoluteURI())
-                .setPath("/").setSecure(exchange.request().isSSL()));
+                .setPath(renardeConfig.auth().scopeCookiesToRootPath() ? rootPath : "/").setSecure(exchange.request().isSSL()));
     }
 
     static Uni<ChallengeData> getRedirect(final RoutingContext exchange, final String location) {
-        String loc = exchange.request().scheme() + "://" + exchange.request().host() + location;
+        String loc = exchange.request().scheme() + "://" + exchange.request().authority() + location;
         return Uni.createFrom().item(new ChallengeData(302, "Location", loc));
     }
 
@@ -72,9 +90,16 @@ public class RenardeJWTAuthMechanism extends JWTAuthMechanism {
                     config.getLoginPage());
             return super.getChallenge(context);
         } else {
-            // we need to store the URL
-            storeInitialLocation(context);
-            return getRedirect(context, config.getLoginPage());
+            String redirectUri;
+            if (redirectType == RenardeConfig.RenardeAuthConfig.Redirect.Type.cookie) {
+                // we need to store the URL
+                storeInitialLocation(context);
+                redirectUri = config.getLoginPage();
+            } else {
+                redirectUri = "%s?%s=%s".formatted(config.getLoginPage(), RenardeJWTAuthMechanism.REDIRECT_URI,
+                        URLEncoder.encode(context.request().absoluteURI(), StandardCharsets.UTF_8));
+            }
+            return getRedirect(context, redirectUri);
         }
     }
 }

@@ -60,12 +60,7 @@ public class QuteResolvers {
 
         public String render(Object... params) {
             I18N i18n = Arc.container().instance(I18N.class).get();
-            String message = i18n.getMessage(key);
-            // try to be helpful if the key doesn't match
-            if (message == null) {
-                return key;
-            }
-            return String.format(message, params);
+            return params.length > 0 ? i18n.formatMessage(key, params) : i18n.getMessage(key);
         }
 
         public Object renderIfParameters(EvalContext ctx) {
@@ -108,6 +103,9 @@ public class QuteResolvers {
                             if (name.startsWith("'") && name.endsWith("'")) {
                                 name = name.substring(1, name.length() - 1);
                             }
+                        }
+                        if (name.equals("$render")) {
+                            return base.render();
                         }
                         MessageKey key = base.append(name, !base.isPendingAppendOperation);
                         base.isPendingAppendOperation = false;

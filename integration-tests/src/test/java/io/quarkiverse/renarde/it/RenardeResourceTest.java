@@ -6,10 +6,14 @@ import static org.apache.http.client.params.CookiePolicy.BROWSER_COMPATIBILITY;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 
+import java.net.URI;
 import java.net.URL;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 
 import jakarta.ws.rs.core.MediaType;
 
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -172,7 +176,7 @@ public class RenardeResourceTest {
                 .then()
                 .statusCode(200)
                 .body(is(
-                        "Email: must be a well-formed email address\n\n\nManual: Required\n\n\nRequired: must not be blank\n\n\n"));
+                        "Email: Must be a well-formed email address.\n\n\nManual: Required.\n\n\nRequired: Required.\n\n\n"));
     }
 
     @Test
@@ -203,7 +207,7 @@ public class RenardeResourceTest {
                 .then()
                 .statusCode(200)
                 .body(is(
-                        "Email: must be a well-formed email address\n\n\nManual: Required\n\n\nRequired: must not be blank\n\n\n"));
+                        "Email: Must be a well-formed email address.\n\n\nManual: Required.\n\n\nRequired: Required.\n\n\n"));
     }
 
     @Test
@@ -238,39 +242,22 @@ public class RenardeResourceTest {
                 .then()
                 .statusCode(302)
                 .header("Location", baseURI + "_renarde/security/login");
-        ValidatableResponse response;
-        // depends on Quarkus main or release
-        try {
-            response = given()
-                    .redirects().follow(false)
-                    .filter(cookieFilter)
-                    .formParam("username", "FroMage")
-                    .formParam("password", "1q2w3e")
-                    .post("/_renarde/security/login")
-                    .then()
-                    .statusCode(303)
-                    .cookie("QuarkusUser",
-                            RestAssuredMatchers.detailedCookie()
-                                    .sameSite("Lax")
-                                    .httpOnly(true))
-                    .header("Location", baseURI + "SecureController/hello");
-        } catch (AssertionError x) {
-            response = given()
-                    .redirects().follow(false)
-                    .filter(cookieFilter)
-                    .formParam("username", "FroMage")
-                    .formParam("password", "1q2w3e")
-                    .post("/_renarde/security/login")
-                    .then()
-                    .statusCode(303)
-                    .cookie("QuarkusUser",
-                            RestAssuredMatchers.detailedCookie()
-                                    .sameSite("LAX")
-                                    .httpOnly(true))
-                    .header("Location", baseURI + "SecureController/hello");
-        }
+        ValidatableResponse response = given()
+                .redirects().follow(false)
+                .filter(cookieFilter)
+                .formParam("username", "FroMage")
+                .formParam("password", "1q2w3e")
+                .post("/_renarde/security/login")
+                .then()
+                .statusCode(303)
+                .cookie("QuarkusUser",
+                        RestAssuredMatchers.detailedCookie()
+                                .sameSite("Lax")
+                                .httpOnly(true))
+                .header("Location", baseURI + "SecureController/hello");
         given()
                 .filter(cookieFilter)
+                .redirects().follow(false)
                 .get("/SecureController/hello")
                 .then()
                 .statusCode(200)
@@ -344,6 +331,50 @@ public class RenardeResourceTest {
                 .when()
                 .multiPart("csrf-token", token)
                 .post("/Application/csrfForm4")
+                .then()
+                .statusCode(200)
+                .body(is("OK"));
+    }
+
+    @Test
+    public void testLoginFormEndpoint() {
+        // without redirect_uri param
+        given()
+                .when()
+                .get("/_renarde/security/login")
+                .then()
+                .body(Matchers.not(Matchers.containsString("<input type=\"hidden\" name=\"redirect_uri\"")));
+
+        // with redirect_uri param
+        String queryParam = URI.create("http://localhost:8080/admin/page?param1=value1&param2=value2").toASCIIString();
+
+        given()
+                .when()
+                .queryParam("redirect_uri", queryParam)
+                .get("/_renarde/security/login")
+                .then()
+                .body(Matchers
+                        .containsString("<input type=\"hidden\" name=\"redirect_uri\" value=\"%s\"/>".formatted(queryParam)));
+
+        // with redirect_uri param that includes a URL as one of its query parameters
+        String innerUrl = URLEncoder.encode("http://localhost:8080/other/page?param1=value1&param2=value2",
+                StandardCharsets.UTF_8);
+        queryParam = "http://localhost:8080/admin/page?url=" + URLEncoder.encode(innerUrl, StandardCharsets.UTF_8);
+        given()
+                .when()
+                .queryParam("redirect_uri", queryParam)
+                .get("/_renarde/security/login")
+                .then()
+                .body(Matchers
+                        .containsString("<input type=\"hidden\" name=\"redirect_uri\" value=\"%s\"/>".formatted(queryParam)));
+    }
+
+    @Test
+    public void testPatch() {
+        given()
+                .when()
+                .log().all()
+                .patch("/Application/patch")
                 .then()
                 .statusCode(200)
                 .body(is("OK"));

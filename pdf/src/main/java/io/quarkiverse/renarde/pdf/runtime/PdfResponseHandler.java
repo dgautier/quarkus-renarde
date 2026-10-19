@@ -10,15 +10,16 @@ import jakarta.ws.rs.container.ContainerResponseContext;
 import jakarta.ws.rs.core.UriInfo;
 
 import org.jboss.logging.Logger;
+import org.jboss.resteasy.reactive.common.core.BlockingOperationSupport;
 import org.jboss.resteasy.reactive.server.ServerResponseFilter;
-import org.jboss.resteasy.reactive.server.core.BlockingOperationSupport;
 
-import com.openhtmltopdf.java2d.api.DefaultPageProcessor;
+import com.openhtmltopdf.java2d.Java2DRenderer;
 import com.openhtmltopdf.java2d.api.FSPageOutputStreamSupplier;
 import com.openhtmltopdf.java2d.api.Java2DRendererBuilder;
 import com.openhtmltopdf.pdfboxout.PdfBoxRenderer;
 import com.openhtmltopdf.pdfboxout.PdfRendererBuilder;
 import com.openhtmltopdf.util.Diagnostic;
+import com.openhtmltopdf.util.ThreadCtx;
 import com.openhtmltopdf.util.XRLog;
 import com.openhtmltopdf.util.XRLogger;
 
@@ -116,22 +117,15 @@ public class PdfResponseHandler {
 
     private void renderPdf(String entity, String baseURI, ContainerResponseContext responseContext) {
         PdfRendererBuilder builder = new PdfRendererBuilder();
-        // FIXME: use this to avoid going over HTTP for static files?
-        //            builder.useHttpStreamImplementation(new FSStreamFactory() {
-        //			@Override
-        //			public FSStream getUrl(String url) {
-        //				// TODO Auto-generated method stub
-        //				return null;
-        //			}
-        //		});
         builder.withHtmlContent(entity, baseURI);
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         builder.toStream(out);
-        PdfBoxRenderer renderer = builder.buildPdfRenderer();
-        try {
+        try (PdfBoxRenderer renderer = builder.buildPdfRenderer()) {
             renderer.createPDF();
         } catch (IOException e) {
             throw new RuntimeException(e);
+        } finally {
+            ThreadCtx.cleanup();
         }
         responseContext.setEntity(out.toByteArray(), null, Pdf.APPLICATION_PDF_TYPE);
     }
@@ -143,24 +137,36 @@ public class PdfResponseHandler {
             if (pageNo == 0) {
                 return out;
             } else {
-                System.err.println(
+                logger.warn(
                         "Rendering PDF to image needs more than one page: this means your content overflows the page size, there will be clipping, and the pages after the first will be discarded");
                 return OutputStream.nullOutputStream();
             }
         };
 
-        DefaultPageProcessor pageProcessor = new DefaultPageProcessor(osSupplier, BufferedImage.TYPE_INT_RGB, "png");
+        DisposingPageProcessor pageProcessor = new DisposingPageProcessor(osSupplier, BufferedImage.TYPE_INT_RGB, "png");
 
         Java2DRendererBuilder builder = new Java2DRendererBuilder();
         builder.withHtmlContent(entity, baseURI);
         builder.useFastMode();
-        builder.useEnvironmentFonts(true); // But see note below.
-
+        builder.useEnvironmentFonts(true);
+        // Each render would otherwise call Font.createFont() for every @font-face, which registers a new
+        // TrueTypeFont in SunFontManager that is never released: that leaks ~5 MB per render. This keeps the fonts
+        // of the @font-face rules (with their weight and style) in a cache shared by all the renders.
+        builder.cacheFonts(true);
         builder.toPageProcessor(pageProcessor);
-        try {
-            builder.runPaged();
+        try (Java2DRenderer renderer = builder.buildJava2DRenderer()) {
+            renderer.layout();
+            renderer.writePages();
         } catch (Exception e) {
             throw new RuntimeException(e);
+        } finally {
+            // Explicitly clean up ThreadCtx to release the SharedContext and
+            // its entire object graph (DOM, CSS, layout tree, BufferedImages).
+            // Java2DRenderer.close() calls ThreadCtx.cleanup() internally, but
+            // in GraalVM native image the ThreadLocal value is not always freed,
+            // causing each worker thread to retain ~5-15 MB from its last render.
+            ThreadCtx.get().setSharedContext(null);
+            ThreadCtx.cleanup();
         }
 
         responseContext.setEntity(out.toByteArray(), null, Pdf.IMAGE_PNG_TYPE);

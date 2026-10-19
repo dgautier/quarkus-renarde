@@ -69,7 +69,7 @@ import io.quarkus.gizmo.ResultHandle;
 import io.quarkus.hibernate.orm.panache.PanacheEntityBase;
 import io.quarkus.panache.common.deployment.EntityField;
 import io.quarkus.panache.common.deployment.EntityModel;
-import io.quarkus.panache.common.deployment.HibernateMetamodelForFieldAccessBuildItem;
+import io.quarkus.panache.hibernate.common.deployment.HibernateMetamodelForFieldAccessBuildItem;
 import io.quarkus.qute.Engine;
 import io.quarkus.qute.ReflectionValueResolver;
 import io.quarkus.qute.Template;
@@ -225,7 +225,8 @@ public class RenardeBackofficeProcessor {
         output.produce(new GeneratedResourceBuildItem(path,
                 rendered.getBytes(StandardCharsets.UTF_8)));
         nativeImageResources.produce(new NativeImageResourceBuildItem(path));
-        templates.produce(new TemplatePathBuildItem(path.substring(10), java.nio.file.Path.of(path), rendered));
+        templates.produce(TemplatePathBuildItem.builder().path(path.substring(10)).fullPath(java.nio.file.Path.of(path))
+                .content(rendered).build());
     }
 
     private void generateEntityController(ClassInfo entityClass, IndexView index, String entityClassName,
@@ -564,7 +565,7 @@ public class RenardeBackofficeProcessor {
                     i++;
                 }
                 m.getParameterAnnotations(i + offset).addAnnotation(RestForm.class).addValue("value", field.name);
-                for (Class<? extends Annotation> validationAnnotation : field.validation) {
+                for (AnnotationInstance validationAnnotation : field.validation) {
                     m.getParameterAnnotations(i + offset).addAnnotation(validationAnnotation);
                 }
                 parameterNames[i + offset] = field.name;
@@ -674,6 +675,18 @@ public class RenardeBackofficeProcessor {
                     value = m.invokeStaticMethod(
                             MethodDescriptor.ofMethod(BackUtil.class, "integerWrapperField", Integer.class, String.class),
                             parameterValue);
+                } else if (field.entityField.descriptor.equals("Ljava/lang/Long;")) {
+                    value = m.invokeStaticMethod(
+                            MethodDescriptor.ofMethod(BackUtil.class, "longWrapperField", Long.class, String.class),
+                            parameterValue);
+                } else if (field.entityField.descriptor.equals("Ljava/lang/Double;")) {
+                    value = m.invokeStaticMethod(
+                            MethodDescriptor.ofMethod(BackUtil.class, "doubleWrapperField", Double.class, String.class),
+                            parameterValue);
+                } else if (field.entityField.descriptor.equals("Ljava/lang/Float;")) {
+                    value = m.invokeStaticMethod(
+                            MethodDescriptor.ofMethod(BackUtil.class, "floatWrapperField", Float.class, String.class),
+                            parameterValue);
                 } else if (field.type == ModelField.Type.Number) {
                     Class<?> primitiveClass;
                     switch (field.entityField.descriptor) {
@@ -762,19 +775,22 @@ public class RenardeBackofficeProcessor {
                                             iterator),
                                     field.relationClass);
                             EntityField inverseField = field.inverseField;
-                            if (field.type == ModelField.Type.MultiMultiRelation) {
-                                ResultHandle inverseRelation = loop.invokeVirtualMethod(
-                                        MethodDescriptor.ofMethod(field.relationClass, inverseField.getGetterName(),
-                                                inverseField.descriptor),
-                                        next);
-                                loop.invokeInterfaceMethod(
-                                        MethodDescriptor.ofMethod(List.class, "remove", boolean.class, Object.class),
-                                        inverseRelation, entityVariable);
-                            } else {
-                                loop.invokeVirtualMethod(
-                                        MethodDescriptor.ofMethod(field.relationClass, inverseField.getSetterName(), void.class,
-                                                inverseField.descriptor),
-                                        next, loop.loadNull());
+                            if (inverseField != null) {
+                                if (field.type == ModelField.Type.MultiMultiRelation) {
+                                    ResultHandle inverseRelation = loop.invokeVirtualMethod(
+                                            MethodDescriptor.ofMethod(field.relationClass, inverseField.getGetterName(),
+                                                    inverseField.descriptor),
+                                            next);
+                                    loop.invokeInterfaceMethod(
+                                            MethodDescriptor.ofMethod(List.class, "remove", boolean.class, Object.class),
+                                            inverseRelation, entityVariable);
+                                } else {
+                                    loop.invokeVirtualMethod(
+                                            MethodDescriptor.ofMethod(field.relationClass, inverseField.getSetterName(),
+                                                    void.class,
+                                                    inverseField.descriptor),
+                                            next, loop.loadNull());
+                                }
                             }
                         }
                         // entity.relation.clear();
@@ -819,20 +835,21 @@ public class RenardeBackofficeProcessor {
                                 id);
                         otherEntity = loop.checkCast(otherEntity, field.relationClass);
                         loop.assign(otherEntityVar, otherEntity);
-
-                        if (field.type == ModelField.Type.MultiMultiRelation) {
-                            ResultHandle inverseRelation = loop.invokeVirtualMethod(
-                                    MethodDescriptor.ofMethod(field.relationClass, inverseField.getGetterName(),
-                                            inverseField.descriptor),
-                                    otherEntityVar);
-                            loop.invokeInterfaceMethod(
-                                    MethodDescriptor.ofMethod(List.class, "add", boolean.class, Object.class),
-                                    inverseRelation, entityVariable);
-                        } else {
-                            loop.invokeVirtualMethod(
-                                    MethodDescriptor.ofMethod(field.relationClass, inverseField.getSetterName(), void.class,
-                                            inverseField.descriptor),
-                                    otherEntityVar, entityVariable);
+                        if (inverseField != null) {
+                            if (field.type == ModelField.Type.MultiMultiRelation) {
+                                ResultHandle inverseRelation = loop.invokeVirtualMethod(
+                                        MethodDescriptor.ofMethod(field.relationClass, inverseField.getGetterName(),
+                                                inverseField.descriptor),
+                                        otherEntityVar);
+                                loop.invokeInterfaceMethod(
+                                        MethodDescriptor.ofMethod(List.class, "add", boolean.class, Object.class),
+                                        inverseRelation, entityVariable);
+                            } else {
+                                loop.invokeVirtualMethod(
+                                        MethodDescriptor.ofMethod(field.relationClass, inverseField.getSetterName(), void.class,
+                                                inverseField.descriptor),
+                                        otherEntityVar, entityVariable);
+                            }
                         }
                         ResultHandle relation = loop.invokeVirtualMethod(
                                 MethodDescriptor.ofMethod(entityClass, field.entityField.getGetterName(),

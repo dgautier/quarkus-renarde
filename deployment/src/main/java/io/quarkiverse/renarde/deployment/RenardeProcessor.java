@@ -1,19 +1,14 @@
 package io.quarkiverse.renarde.deployment;
 
-import java.io.File;
-import java.io.FileWriter;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.reflect.Modifier;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.KeyPair;
-import java.security.KeyPairGenerator;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Base64;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -22,7 +17,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
@@ -89,11 +83,10 @@ import io.quarkus.arc.deployment.GeneratedBeanGizmoAdaptor;
 import io.quarkus.arc.deployment.UnremovableBeanBuildItem;
 import io.quarkus.arc.processor.BuiltinScope;
 import io.quarkus.bootstrap.classloading.QuarkusClassLoader;
-import io.quarkus.bootstrap.workspace.ArtifactSources;
-import io.quarkus.bootstrap.workspace.SourceDir;
 import io.quarkus.deployment.ApplicationArchive;
 import io.quarkus.deployment.Capabilities;
 import io.quarkus.deployment.Capability;
+import io.quarkus.deployment.IsLocalDevelopment;
 import io.quarkus.deployment.annotations.BuildProducer;
 import io.quarkus.deployment.annotations.BuildStep;
 import io.quarkus.deployment.annotations.ExecutionTime;
@@ -108,13 +101,14 @@ import io.quarkus.deployment.builditem.FeatureBuildItem;
 import io.quarkus.deployment.builditem.HotDeploymentWatchedFileBuildItem;
 import io.quarkus.deployment.builditem.LaunchModeBuildItem;
 import io.quarkus.deployment.builditem.RunTimeConfigurationDefaultBuildItem;
+import io.quarkus.deployment.builditem.nativeimage.JniRuntimeAccessBuildItem;
 import io.quarkus.deployment.builditem.nativeimage.NativeImageResourceBuildItem;
 import io.quarkus.deployment.builditem.nativeimage.NativeImageResourceDirectoryBuildItem;
 import io.quarkus.deployment.builditem.nativeimage.RuntimeInitializedClassBuildItem;
 import io.quarkus.deployment.execannotations.ExecutionModelAnnotationsAllowedBuildItem;
 import io.quarkus.deployment.logging.LogCleanupFilterBuildItem;
-import io.quarkus.deployment.pkg.builditem.CurateOutcomeBuildItem;
 import io.quarkus.deployment.util.AsmUtil;
+import io.quarkus.devui.spi.page.CardPageBuildItem;
 import io.quarkus.gizmo.BytecodeCreator;
 import io.quarkus.gizmo.ClassCreator;
 import io.quarkus.gizmo.ClassOutput;
@@ -132,7 +126,10 @@ import io.quarkus.resteasy.reactive.spi.CustomExceptionMapperBuildItem;
 import io.quarkus.resteasy.reactive.spi.ParamConverterBuildItem;
 import io.quarkus.runtime.LocalesBuildTimeConfig;
 import io.quarkus.runtime.StartupEvent;
+import io.quarkus.smallrye.jwt.deployment.GenerateEncryptedDevModeJwtKeysBuildItem;
+import io.quarkus.smallrye.jwt.deployment.GeneratePersistentDevModeJwtKeysBuildItem;
 import io.quarkus.smallrye.jwt.runtime.auth.JWTAuthMechanism;
+import io.quarkus.vertx.http.deployment.HttpRootPathBuildItem;
 import io.smallrye.mutiny.Multi;
 import io.smallrye.mutiny.Uni;
 
@@ -164,6 +161,16 @@ public class RenardeProcessor {
 
     private static final String FEATURE = "renarde";
 
+    private static final String[] OPENHTMLTOPDF_NATIVE_RUNTIME = new String[] {
+            // This causes the pdfbox to log at static init time, which creates a JUL which is forbidden
+            "com.openhtmltopdf.resource.FSEntityResolver",
+            // These call java/awt stuff at static init, which may initialise Java2D
+            "com.openhtmltopdf.java2d.image.AWTFSImage",
+            "com.openhtmltopdf.java2d.image.AWTFSImage$NullImage",
+            "com.openhtmltopdf.pdfboxout.PdfBoxFastOutputDevice",
+            // This one initialises fonts at build time
+            "com.openhtmltopdf.pdfboxout.fontstore.AbstractFontStore$BuiltinFontStore",
+    };
     private static final String PDFBOX_PROBLEMATIC_CLASS = "org.apache.pdfbox.pdmodel.encryption.PublicKeySecurityHandler";
     private static final String PDF_RESPONSE_HANDLER_CLASS = "io.quarkiverse.renarde.pdf.runtime.PdfResponseHandler";
 
@@ -178,34 +185,29 @@ public class RenardeProcessor {
     @BuildStep
     void setupPdfBox(BuildProducer<RuntimeInitializedClassBuildItem> runtimeInitializedClassBuildItem,
             BuildProducer<NativeImageResourceBuildItem> nativeImageResourceBuildItem,
-            BuildProducer<NativeImageResourceDirectoryBuildItem> resource) {
+            BuildProducer<NativeImageResourceDirectoryBuildItem> resource,
+            BuildProducer<JniRuntimeAccessBuildItem> jniRuntimeAccessBuildItem) {
         // If we have the renarde-pdf module, we'll see this class
         if (QuarkusClassLoader.isClassPresentAtRuntime(PDF_RESPONSE_HANDLER_CLASS)) {
-            // Perhaps try to unify with https://github.com/quarkiverse/quarkus-pdfbox ?
-
             // This one needs to be initialised at runtime on jdk21/graalvm 23.1 because setting the logger starts the java2d disposer thread
             runtimeInitializedClassBuildItem.produce(new RuntimeInitializedClassBuildItem(PDF_RESPONSE_HANDLER_CLASS));
-            // This one starts some crypto stuff
-            runtimeInitializedClassBuildItem.produce(new RuntimeInitializedClassBuildItem(PDFBOX_PROBLEMATIC_CLASS));
-            // This is started by anybody doing graphics at startup time, including pdfbox instantiating an empty image
-            runtimeInitializedClassBuildItem.produce(new RuntimeInitializedClassBuildItem("sun.java2d.Disposer"));
-            // This causes the pdfbox to log at static init time, which creates a JUL which is forbidden
-            runtimeInitializedClassBuildItem
-                    .produce(new RuntimeInitializedClassBuildItem("com.openhtmltopdf.resource.FSEntityResolver"));
-            // These call java/awt stuff at static init, which may initialise Java2D
-            runtimeInitializedClassBuildItem
-                    .produce(new RuntimeInitializedClassBuildItem("com.openhtmltopdf.java2d.image.AWTFSImage"));
-            runtimeInitializedClassBuildItem
-                    .produce(new RuntimeInitializedClassBuildItem("com.openhtmltopdf.java2d.image.AWTFSImage$NullImage"));
-            runtimeInitializedClassBuildItem
-                    .produce(new RuntimeInitializedClassBuildItem("com.openhtmltopdf.pdfboxout.PdfBoxFastOutputDevice"));
-            // These are needed at runtime for native image, and missing from quarkiverse-pdfbox
+            for (String klass : OPENHTMLTOPDF_NATIVE_RUNTIME) {
+                runtimeInitializedClassBuildItem
+                        .produce(new RuntimeInitializedClassBuildItem(klass));
+            }
+            // These are needed at runtime for native image for openhtmltopdf
             nativeImageResourceBuildItem.produce(
                     new NativeImageResourceBuildItem(List.of("resources/css/XhtmlNamespaceHandler.css",
                             "resources/schema/openhtmltopdf/catalog-special.xml",
                             "resources/schema/openhtmltopdf/char-entities-xhtml-only.ent",
                             "resources/schema/openhtmltopdf/char-entities-xhtml-mathml.ent")));
             resource.produce(new NativeImageResourceDirectoryBuildItem("org/apache/pdfbox/resources/ttf"));
+            // XToolkit native code calls FindClass("java/lang/Thread") — without
+            // this registration, the AWT-XAWT thread crashes with NoClassDefFoundError,
+            // corrupting AWT state and preventing the Java2D Disposer from cleaning
+            // up BufImgSurfaceData weak JNI global refs
+            jniRuntimeAccessBuildItem
+                    .produce(new JniRuntimeAccessBuildItem(true, true, true, "java.lang.Thread"));
 
         }
     }
@@ -234,8 +236,6 @@ public class RenardeProcessor {
             // this allows me to create an exception mapper for auth failures (expired token, invalid user)
             // even with this I can't use an exception mapper apparently, but need to register a reactive route
             defineUnlessPresent("quarkus.http.auth.proactive", "false", config, runtimeConfigurationBuildItem);
-            // not sure this one matters, just has to be set to any value AFAICT
-            defineUnlessPresent("mp.jwt.verify.issuer", "https://example.com/issuer", config, runtimeConfigurationBuildItem);
             // those are the better defaults
             defineUnlessPresent("mp.jwt.token.header", "Cookie", config, runtimeConfigurationBuildItem);
             defineUnlessPresent("mp.jwt.token.cookie", "QuarkusUser", config, runtimeConfigurationBuildItem);
@@ -263,83 +263,13 @@ public class RenardeProcessor {
         }
     }
 
+    // This is now handled by Quarkus Core, with build-item-based customisations
     @BuildStep
-    void setupJWT(LaunchModeBuildItem launchMode, Capabilities capabilities,
-            BuildProducer<RunTimeConfigurationDefaultBuildItem> runtimeConfigurationBuildItem,
-            CurateOutcomeBuildItem curateOutcomeBuildItem)
-            throws IOException, NoSuchAlgorithmException {
-        if (launchMode.getLaunchMode().isDevOrTest()
-                && capabilities.isPresent(Capability.JWT)) {
-            // make sure we have minimal config
-            final Config config = ConfigProvider.getConfig();
-
-            // PRIVATE
-            Optional<String> decryptKeyLocationOpt = config.getOptionalValue("mp.jwt.decrypt.key.location", String.class);
-            Optional<String> signKeyLocationOpt = config.getOptionalValue("smallrye.jwt.sign.key.location", String.class);
-            // PUBLIC
-            Optional<String> verifyKeyOpt = config.getOptionalValue("mp.jwt.verify.publickey", String.class);
-            Optional<String> verifyKeyLocationOpt = config.getOptionalValue("mp.jwt.verify.publickey.location", String.class);
-            Optional<String> encryptKeyLocationOpt = config.getOptionalValue("smallrye.jwt.encrypt.key.location", String.class);
-            if (!decryptKeyLocationOpt.isPresent()
-                    && !signKeyLocationOpt.isPresent()
-                    && !verifyKeyOpt.isPresent()
-                    && !verifyKeyLocationOpt.isPresent()
-                    && !encryptKeyLocationOpt.isPresent()) {
-                // FIXME: folder
-
-                File buildDir = null;
-                ArtifactSources src = curateOutcomeBuildItem.getApplicationModel().getAppArtifact().getSources();
-                if (src != null) { // shouldn't be null in dev mode
-                    Collection<SourceDir> srcDirs = src.getResourceDirs();
-                    if (srcDirs.isEmpty()) {
-                        // in the module has no resources dir?
-                        srcDirs = src.getSourceDirs();
-                    }
-                    if (!srcDirs.isEmpty()) {
-                        // pick the first resources output dir
-                        Path resourcesOutputDir = srcDirs.iterator().next().getOutputDir();
-                        buildDir = resourcesOutputDir.toFile();
-                    }
-                }
-                if (buildDir == null) {
-                    // the module doesn't have any sources nor resources, stick to the build dir
-                    buildDir = new File(
-                            curateOutcomeBuildItem.getApplicationModel().getAppArtifact().getWorkspaceModule().getBuildDir(),
-                            "classes");
-                }
-
-                buildDir.mkdirs();
-                File privateKey = new File(buildDir, "dev.privateKey.pem");
-                File publicKey = new File(buildDir, "dev.publicKey.pem");
-                if (!privateKey.exists() && !publicKey.exists()) {
-                    KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
-                    kpg.initialize(2048);
-                    KeyPair kp = kpg.generateKeyPair();
-
-                    logger.infof("Generating private/public keys for DEV/TEST in %s and %s", privateKey, publicKey);
-                    try (FileWriter fw = new FileWriter(privateKey)) {
-                        fw.append("-----BEGIN PRIVATE KEY-----\n");
-                        fw.append(Base64.getMimeEncoder().encodeToString(kp.getPrivate().getEncoded()));
-                        fw.append("\n");
-                        fw.append("-----END PRIVATE KEY-----\n");
-                    }
-                    try (FileWriter fw = new FileWriter(publicKey)) {
-                        fw.append("-----BEGIN PUBLIC KEY-----\n");
-                        fw.append(Base64.getMimeEncoder().encodeToString(kp.getPublic().getEncoded()));
-                        fw.append("\n");
-                        fw.append("-----END PUBLIC KEY-----\n");
-                    }
-                }
-                runtimeConfigurationBuildItem
-                        .produce(new RunTimeConfigurationDefaultBuildItem("mp.jwt.decrypt.key.location", privateKey.getName()));
-                runtimeConfigurationBuildItem.produce(
-                        new RunTimeConfigurationDefaultBuildItem("smallrye.jwt.sign.key.location", privateKey.getName()));
-                runtimeConfigurationBuildItem.produce(
-                        new RunTimeConfigurationDefaultBuildItem("mp.jwt.verify.publickey.location", publicKey.getName()));
-                runtimeConfigurationBuildItem.produce(
-                        new RunTimeConfigurationDefaultBuildItem("smallrye.jwt.encrypt.key.location", publicKey.getName()));
-            }
-        }
+    void generatePersistendJwtTokensInDevMode(
+            BuildProducer<GeneratePersistentDevModeJwtKeysBuildItem> generatePersistentDevModeJwtKeysBuildItemBuildProducer,
+            BuildProducer<GenerateEncryptedDevModeJwtKeysBuildItem> generateEncryptedDevModeJwtKeysBuildItemBuildProducer) {
+        generatePersistentDevModeJwtKeysBuildItemBuildProducer.produce(new GeneratePersistentDevModeJwtKeysBuildItem());
+        generateEncryptedDevModeJwtKeysBuildItemBuildProducer.produce(new GenerateEncryptedDevModeJwtKeysBuildItem());
     }
 
     @BuildStep
@@ -528,7 +458,8 @@ public class RenardeProcessor {
                                     && !isAsync(method.returnType())
                                     && (method.hasAnnotation(ResteasyReactiveDotNames.POST)
                                             || method.hasAnnotation(ResteasyReactiveDotNames.PUT)
-                                            || method.hasAnnotation(ResteasyReactiveDotNames.DELETE))) {
+                                            || method.hasAnnotation(ResteasyReactiveDotNames.DELETE)
+                                            || method.hasAnnotation(ResteasyReactiveDotNames.PATCH))) {
                                 transformationContext.transform().add(DOTNAME_TRANSACTIONAL)
                                         .done();
                             }
@@ -791,7 +722,8 @@ public class RenardeProcessor {
                     && !method.hasAnnotation(ResteasyReactiveDotNames.POST)
                     && !method.hasAnnotation(ResteasyReactiveDotNames.HEAD)
                     && !method.hasAnnotation(ResteasyReactiveDotNames.OPTIONS)
-                    && !method.hasAnnotation(ResteasyReactiveDotNames.DELETE)) {
+                    && !method.hasAnnotation(ResteasyReactiveDotNames.DELETE)
+                    && !method.hasAnnotation(ResteasyReactiveDotNames.PATCH)) {
                 ti.transform().add(ResteasyReactiveDotNames.GET).done();
             }
         }
@@ -822,7 +754,11 @@ public class RenardeProcessor {
             BuildProducer<ExcludedControllerBuildItem> excludedControllerBuildItems,
             BuildProducer<ExcludedTypeBuildItem> excludedTypeBuildItems,
             BuildProducer<BuildTimeConditionBuildItem> buildTimeConditionBuildItems) {
-        if (indexBuildItem.getIndex().getAllKnownImplementors(DOTNAME_USER_WITH_PASSWORD).isEmpty()) {
+        // we can't support this controller unless we have an implementation of RenardeUserWithPassword
+        // but we also disable this if the user has his own @LoginPage, because it's redundant
+        if (indexBuildItem.getIndex().getAllKnownImplementors(DOTNAME_USER_WITH_PASSWORD).isEmpty()
+                // There is always 1 in DOTNAME_RENARDE_FORM_LOGIN_CONTROLLER, which we ignore if the user has another one
+                || indexBuildItem.getIndex().getAnnotations(DOTNAME_LOGIN_PAGE).size() > 1) {
             // for Renarde
             excludedControllerBuildItems.produce(new ExcludedControllerBuildItem(DOTNAME_RENARDE_FORM_LOGIN_CONTROLLER));
             // for RESTEasy Reactive
@@ -839,7 +775,8 @@ public class RenardeProcessor {
     @Record(ExecutionTime.STATIC_INIT)
     void configureLoginPage(RenardeRecorder recorder,
             LoginPageBuildItem loginPageBuildItem,
-            BeanContainerBuildItem beanContainerBuildItem) {
+            BeanContainerBuildItem beanContainerBuildItem,
+            HttpRootPathBuildItem httpRootPath) {
         String loginPage;
         if (loginPageBuildItem != null) {
             loginPage = loginPageBuildItem.uri;
@@ -867,7 +804,32 @@ public class RenardeProcessor {
                 loginPage = "/";
             }
         }
+        loginPage = prependRootPath(httpRootPath.getRootPath(), loginPage);
         recorder.configureLoginPage(beanContainerBuildItem.getValue(), loginPage);
+    }
+
+    /**
+     * Prepends the HTTP root path to the given path.
+     * <p>
+     * If the root path is {@code "/"}, the path is returned unchanged.
+     * If the given path is {@code "/"}, only the root path is returned.
+     * Otherwise, the root path is prepended to the path, taking care to avoid double slashes.
+     *
+     * @param rootPath the HTTP root path (e.g. {@code "/my-app"} or {@code "/"})
+     * @param path the path to prepend the root path to (e.g. {@code "/_renarde/security/login"})
+     * @return the path with the root path prepended (e.g. {@code "/my-app/_renarde/security/login"})
+     */
+    private static String prependRootPath(String rootPath, String path) {
+        if (rootPath.equals("/")) {
+            return path;
+        }
+        if (rootPath.endsWith("/")) {
+            rootPath = rootPath.substring(0, rootPath.length() - 1);
+        }
+        if (path.equals("/")) {
+            return rootPath;
+        }
+        return rootPath + path;
     }
 
     @BuildStep
@@ -896,7 +858,7 @@ public class RenardeProcessor {
                                 String language;
                                 if (name.startsWith("messages.")) {
                                     // default language
-                                    language = locales.defaultLocale.getLanguage();
+                                    language = locales.defaultLocale().orElse(Locale.getDefault()).getLanguage();
                                 } else {
                                     // messages_lang.properties
                                     language = name.substring(9, name.length() - 11);
@@ -923,7 +885,7 @@ public class RenardeProcessor {
             recorder.addLanguageBundle(beanContainerBuildItem.getValue(), entry.getKey(), entry.getValue().toString());
         }
 
-        for (Locale locale : locales.locales) {
+        for (Locale locale : locales.locales()) {
             String lang = locale.getLanguage();
             if (!languageToPath.containsKey(lang)) {
                 logger.warnf(
@@ -935,4 +897,12 @@ public class RenardeProcessor {
             logger.infof("Supported locales with messages: %s", languageToPath.keySet());
         }
     }
+
+    @BuildStep(onlyIf = { IsLocalDevelopment.class })
+    public CardPageBuildItem create() {
+        CardPageBuildItem card = new CardPageBuildItem();
+        card.setLogo("renarde-head.svg", "renarde-head.svg");
+        return card;
+    }
+
 }

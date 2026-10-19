@@ -29,9 +29,10 @@ import io.quarkiverse.renarde.security.LoginPage;
 import io.quarkiverse.renarde.security.RenardeSecurity;
 import io.quarkiverse.renarde.security.RenardeUser;
 import io.quarkiverse.renarde.security.RenardeUserProvider;
+import io.quarkiverse.renarde.security.RenardeUserWithPassword;
 import io.quarkus.elytron.security.common.BcryptUtil;
 import io.quarkus.security.Authenticated;
-import io.quarkus.test.QuarkusUnitTest;
+import io.quarkus.test.QuarkusExtensionTest;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.restassured.RestAssured;
 import io.smallrye.jwt.build.Jwt;
@@ -39,7 +40,7 @@ import io.smallrye.jwt.build.Jwt;
 public class CustomLoginControllerTest {
 
     @RegisterExtension
-    static final QuarkusUnitTest config = new QuarkusUnitTest()
+    static final QuarkusExtensionTest config = new QuarkusExtensionTest()
             .setArchiveProducer(() -> ShrinkWrap.create(JavaArchive.class)
                     .addClasses(MyUser.class, MyUserProvider.class, MyController.class)
                     .addAsManifestResource(EmptyAsset.INSTANCE, "beans.xml"));
@@ -86,7 +87,7 @@ public class CustomLoginControllerTest {
     @Test
     public void testLoginPageWithInvalidJwt() {
 
-        String token = Jwt.issuer("https://example.com/issuer")
+        String token = Jwt.issuer("https://quarkus.io/issuer")
                 .upn("user")
                 .issuedAt(Instant.now())
                 .expiresIn(Duration.ofDays(10))
@@ -104,7 +105,7 @@ public class CustomLoginControllerTest {
                 .body(Matchers.is("fake login page"));
 
         // invalid issuer
-        token = Jwt.issuer("https://example.com/other-issuer")
+        token = Jwt.issuer("https://quarkus.io/other-issuer")
                 .upn("user")
                 .innerSign().encrypt();
 
@@ -156,7 +157,7 @@ public class CustomLoginControllerTest {
         }
     }
 
-    public static class MyUser implements RenardeUser {
+    public static class MyUser implements RenardeUserWithPassword {
 
         String username;
         String password;
@@ -174,6 +175,11 @@ public class CustomLoginControllerTest {
         @Override
         public boolean registered() {
             return true;
+        }
+
+        @Override
+        public String password() {
+            return password;
         }
     }
 

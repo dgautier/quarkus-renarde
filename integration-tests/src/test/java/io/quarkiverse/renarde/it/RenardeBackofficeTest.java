@@ -22,7 +22,6 @@ import jakarta.ws.rs.core.MediaType;
 
 import org.hamcrest.Matcher;
 import org.hamcrest.Matchers;
-import org.hibernate.engine.jdbc.BlobProxy;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.select.Elements;
@@ -31,11 +30,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import io.quarkiverse.renarde.jpa.NamedBlob;
+import io.quarkiverse.renarde.oidc.test.RenardeCookieFilter;
 import io.quarkiverse.renarde.util.JavaExtensions;
 import io.quarkus.hibernate.orm.panache.Panache;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import io.restassured.specification.RequestSpecification;
+import model.ConstraintedEntity;
 import model.CustomIdEntity;
 import model.CustomIdOneToManyEntity;
 import model.ExampleEntity;
@@ -46,6 +47,7 @@ import model.ManyToOneEntity;
 import model.OneToManyEntity;
 import model.OneToOneNotOwningEntity;
 import model.OneToOneOwningEntity;
+import model.RelatedConstraintedEntity;
 
 @QuarkusTest
 public class RenardeBackofficeTest {
@@ -59,6 +61,8 @@ public class RenardeBackofficeTest {
     @Transactional
     @BeforeEach
     public void before() {
+        ConstraintedEntity.deleteAll();
+        RelatedConstraintedEntity.deleteAll();
         ManyToOneEntity.deleteAll();
         ExampleEntity.deleteAll();
         OneToOneOwningEntity.deleteAll();
@@ -86,6 +90,8 @@ public class RenardeBackofficeTest {
 
         new ManyToManyNotOwningEntity().persist();
         new ManyToManyNotOwningEntity().persist();
+
+        new RelatedConstraintedEntity().persist();
     }
 
     @Test
@@ -141,13 +147,18 @@ public class RenardeBackofficeTest {
         Assertions.assertEquals(1, document.select(
                 "input[name='primitiveLong'][type='number'][min=" + Long.MIN_VALUE + "][max=" + Long.MAX_VALUE + "][step=1.0]")
                 .size());
+        Assertions.assertEquals(1, document.select(
+                "input[name='wrapperLong'][type='number'][min=" + Long.MIN_VALUE + "][max=" + Long.MAX_VALUE + "][step=1.0]")
+                .size());
         Assertions.assertEquals(1, document.select("input[name='primitiveFloat'][type='number'][step=1.0E-5]").size());
+        Assertions.assertEquals(1, document.select("input[name='wrapperFloat'][type='number'][step=1.0E-5]").size());
         Assertions.assertEquals(1, document.select("input[name='primitiveDouble'][type='number'][step=1.0E-5]").size());
+        Assertions.assertEquals(1, document.select("input[name='wrapperDouble'][type='number'][step=1.0E-5]").size());
         Assertions.assertEquals(1,
                 document.select("input[name='primitiveChar'][type='text'][minlength=1][maxlength=1]").size());
         Assertions.assertEquals(1, document.select("input[name='string']").size());
         Assertions.assertEquals(1, document.select("input[name='requiredString']").size());
-        Assertions.assertEquals("This field is required",
+        Assertions.assertEquals("This field is required.",
                 document.select("input[name='requiredString'] ~ small.form-text").text());
         Assertions.assertEquals(1, document.select("textarea[name='lobString']").size());
         Assertions.assertEquals(1, document.select("textarea[name='longString1']").size());
@@ -222,8 +233,11 @@ public class RenardeBackofficeTest {
                 .multiPart("primitiveInt", "3")
                 .multiPart("wrapperInt", "3")
                 .multiPart("primitiveLong", "4")
+                .multiPart("wrapperLong", "4")
                 .multiPart("primitiveFloat", "5")
+                .multiPart("wrapperFloat", "5")
                 .multiPart("primitiveDouble", "6")
+                .multiPart("wrapperDouble", "6")
                 .multiPart("primitiveChar", "a")
                 .multiPart("string", "aString")
                 .multiPart("requiredString", "aString")
@@ -232,6 +246,8 @@ public class RenardeBackofficeTest {
                 .multiPart("longString2", "aString")
                 .multiPart("longString3", "aString")
                 .multiPart("longString4", "aString")
+                .multiPart("commentedNotNull1String", "aCommentedNotNull1String")
+                .multiPart("commentedNotNull2String", "aCommentedNotNull2String")
                 .multiPart("enumeration", "B")
                 .multiPart("date", JavaExtensions.htmlNormalised(date))
                 .multiPart("timestamp", JavaExtensions.htmlNormalised(localDateTime))
@@ -268,8 +284,11 @@ public class RenardeBackofficeTest {
         Assertions.assertEquals(3, entity.primitiveInt);
         Assertions.assertEquals(3, entity.wrapperInt);
         Assertions.assertEquals(4, entity.primitiveLong);
+        Assertions.assertEquals(4, entity.wrapperLong);
         Assertions.assertEquals(5, entity.primitiveFloat);
+        Assertions.assertEquals(5, entity.wrapperFloat);
         Assertions.assertEquals(6, entity.primitiveDouble);
+        Assertions.assertEquals(6, entity.wrapperDouble);
         Assertions.assertEquals('a', entity.primitiveChar);
         Assertions.assertEquals(date, entity.date);
         Assertions.assertEquals(localDateTime, entity.localDateTime);
@@ -312,6 +331,90 @@ public class RenardeBackofficeTest {
         Assertions.assertEquals(1, entity.jsonRecords.get(0).getSomething());
         Assertions.assertEquals(ExampleEnum.B, entity.jsonRecords.get(1).getExampleEnum());
         Assertions.assertEquals(2, entity.jsonRecords.get(1).getSomething());
+    }
+
+    @Test
+    public void testBackofficeFailedValidation() {
+        Assertions.assertEquals(0, ConstraintedEntity.count());
+        RenardeCookieFilter cookieFilter = new RenardeCookieFilter();
+
+        // we do the redirect manually because RestAssured does not store cookies during redirects
+        given()
+                .filter(cookieFilter)
+                .when()
+                .multiPart("urlString", "a")
+                .multiPart("lengthString", "a")
+                .multiPart("sizeString", "a")
+                .multiPart("action", "CreateAndCreateAnother")
+                .redirects().follow(false)
+                .post("/_renarde/backoffice/ConstraintedEntity/create")
+                .then()
+                .statusCode(303)
+                .header("Location", Matchers.endsWith("/_renarde/backoffice/ConstraintedEntity/create"));
+        // reload for errors
+        String html = given()
+                .filter(cookieFilter)
+                .when()
+                .redirects().follow(false)
+                .get("/_renarde/backoffice/ConstraintedEntity/create")
+                .then()
+                .statusCode(200)
+                .extract().body().asString();
+        Document document = Jsoup.parse(html);
+        System.err.println(html);
+        checkInvalidItem(document, "input", "nonNullableString", "This field is required.", "Required.", true);
+        checkInvalidItem(document, "input", "nonEmptyString", "This field is required.", "Required.", true);
+        checkInvalidItem(document, "input", "nonNullString", "This field is required.", "Required.", true);
+        checkInvalidItem(document, "input", "nonBlankString", "This field is required.", "Required.", true);
+        checkInvalidItem(document, "input", "urlString", "This field must be a URL.", "Must be a valid URL.", false);
+        checkInvalidItem(document, "input", "sizeString", "This field must be between 2 and 100 characters.",
+                "Size must be between 2 and 100.", false);
+        checkInvalidItem(document, "input", "lengthString", "This field must be between 2 and 100 characters.",
+                "Length must be between 2 and 100.", false);
+        checkInvalidItem(document, "select", "relatedEntity", "This field is required.", "Required.", true);
+
+        Assertions.assertEquals(0, ConstraintedEntity.count());
+
+        RelatedConstraintedEntity relatedEntity = RelatedConstraintedEntity.<RelatedConstraintedEntity> listAll().get(0);
+
+        // now make sure we can create a valid one
+        given()
+                .filter(cookieFilter)
+                .when()
+                .multiPart("nonNullableString", "a")
+                .multiPart("nonEmptyString", "b")
+                .multiPart("nonNullString", "c")
+                .multiPart("nonBlankString", "d")
+                .multiPart("urlString", "http://example.com")
+                .multiPart("lengthString", "abc")
+                .multiPart("sizeString", "def")
+                .multiPart("relatedEntity", relatedEntity.id)
+                .multiPart("action", "CreateAndCreateAnother")
+                .redirects().follow(false)
+                .post("/_renarde/backoffice/ConstraintedEntity/create")
+                .then()
+                .statusCode(303)
+                .header("Location", Matchers.endsWith("/_renarde/backoffice/ConstraintedEntity/create"));
+
+        Assertions.assertEquals(1, ConstraintedEntity.count());
+        ConstraintedEntity entity = ConstraintedEntity.<ConstraintedEntity> listAll().get(0);
+        Assertions.assertEquals("a", entity.nonNullableString);
+        Assertions.assertEquals("b", entity.nonEmptyString);
+        Assertions.assertEquals("c", entity.nonNullString);
+        Assertions.assertEquals("d", entity.nonBlankString);
+        Assertions.assertEquals("http://example.com", entity.urlString);
+        Assertions.assertEquals("abc", entity.lengthString);
+        Assertions.assertEquals("def", entity.sizeString);
+        Assertions.assertEquals(relatedEntity, entity.relatedEntity);
+    }
+
+    private void checkInvalidItem(Document document, String type, String name, String help, String invalid, boolean required) {
+        Assertions.assertEquals(1, document.select(type + "[name='" + name + "'].form-control.is-invalid").size());
+        Assertions.assertEquals(help,
+                document.select(type + "[name='" + name + "'] ~ small.form-text").text());
+        Assertions.assertEquals(invalid,
+                document.select(type + "[name='" + name + "'] ~ span.invalid-feedback").text());
+        Assertions.assertEquals(document.select(type + "[name='" + name + "']").hasAttr("required"), required);
     }
 
     @Test
@@ -418,6 +521,8 @@ public class RenardeBackofficeTest {
                 .multiPart("localDateTime", localDateTime.format(JavaExtensions.HTML_NORMALISED_WITHOUT_SECONDS))
                 .multiPart("localTime", localDateTime.format(JavaExtensions.HTML_TIME_WITHOUT_SECONDS))
                 .multiPart("requiredString", "aString")
+                .multiPart("commentedNotNull1String", "aCommentedNotNull1String")
+                .multiPart("commentedNotNull2String", "aCommentedNotNull2String")
                 .multiPart("action", "CreateAndCreateAnother")
                 .redirects().follow(false)
                 .log().ifValidationFails()
@@ -478,7 +583,9 @@ public class RenardeBackofficeTest {
         RequestSpecification requestSpecification = given()
                 .when()
                 .contentType(ContentType.MULTIPART)
-                .multiPart("requiredString", "aString");
+                .multiPart("requiredString", "aString")
+                .multiPart("commentedNotNull1String", "aCommentedNotNull1String")
+                .multiPart("commentedNotNull2String", "aCommentedNotNull2String");
         if (identifiant != null) {
             requestSpecification
                     .multiPart("identifiant", identifiant);
@@ -515,8 +622,11 @@ public class RenardeBackofficeTest {
         entity.primitiveInt = 3;
         entity.wrapperInt = 3;
         entity.primitiveLong = 4;
+        entity.wrapperLong = 4L;
         entity.primitiveFloat = 5;
+        entity.wrapperFloat = 5F;
         entity.primitiveDouble = 6;
+        entity.wrapperDouble = 6D;
         entity.primitiveChar = 'a';
         entity.string = "aString";
         entity.lobString = "aString";
@@ -530,6 +640,9 @@ public class RenardeBackofficeTest {
         entity.localDate = localDateTime.toLocalDate();
         entity.localTime = localDateTime.toLocalTime();
         entity.timestamp = Timestamp.valueOf(localDateTime);
+        entity.commentedString = "aCommentedString";
+        entity.commentedNotNull1String = "aCommentedNotNull1String";
+        entity.commentedNotNull2String = "aCommentedNotNull2String";
         entity.enumeration = ExampleEnum.B;
         entity.oneToOneOwning = oneToOnes.get(0);
         entity.manyToOne = oneToManys.get(0);
@@ -540,11 +653,8 @@ public class RenardeBackofficeTest {
         entity.manyToManyNotOwning.add(manyToManyOwning.get(0));
         entity.manyToManyNotOwning.add(manyToManyOwning.get(1));
         entity.arrayBlob = "not touched".getBytes();
-        entity.sqlBlob = BlobProxy.generateProxy("to update".getBytes());
-        entity.namedBlob = new NamedBlob();
-        entity.namedBlob.name = "named.pdf";
-        entity.namedBlob.contents = BlobProxy.generateProxy("to update as well".getBytes());
-        entity.namedBlob.mimeType = "application/pdf";
+        entity.sqlBlob = Panache.getSession().getLobHelper().createBlob("to update".getBytes());
+        entity.namedBlob = new NamedBlob("named.pdf", "application/pdf", "to update as well".getBytes());
         entity.jsonRecords = Arrays.asList(new ExampleEntity.JsonRecord(ExampleEnum.A, 2));
         // oneToMany is not owning
         ExampleEntity damnit = entity;
@@ -585,15 +695,23 @@ public class RenardeBackofficeTest {
                 "input[name='primitiveLong'][type='number'][min=" + Long.MIN_VALUE + "][max=" + Long.MAX_VALUE
                         + "][step=1.0][value=4]")
                 .size());
+        Assertions.assertEquals(1, document.select(
+                "input[name='wrapperLong'][type='number'][min=" + Long.MIN_VALUE + "][max=" + Long.MAX_VALUE
+                        + "][step=1.0][value=4]")
+                .size());
         Assertions.assertEquals(1,
                 document.select("input[name='primitiveFloat'][type='number'][step=1.0E-5][value=5.0]").size());
         Assertions.assertEquals(1,
+                document.select("input[name='wrapperFloat'][type='number'][step=1.0E-5][value=5.0]").size());
+        Assertions.assertEquals(1,
                 document.select("input[name='primitiveDouble'][type='number'][step=1.0E-5][value=6.0]").size());
+        Assertions.assertEquals(1,
+                document.select("input[name='wrapperDouble'][type='number'][step=1.0E-5][value=6.0]").size());
         Assertions.assertEquals(1,
                 document.select("input[name='primitiveChar'][type='text'][minlength=1][maxlength=1][value='a']").size());
         Assertions.assertEquals(1, document.select("input[name='string'][value='aString']").size());
         Assertions.assertEquals(1, document.select("input[name='requiredString'][value='aString']").size());
-        Assertions.assertEquals("This field is required",
+        Assertions.assertEquals("This field is required.",
                 document.select("input[name='requiredString'] ~ small.form-text").text());
         Assertions.assertEquals("aString", document.select("textarea[name='lobString']").text());
         Assertions.assertEquals("aString", document.select("textarea[name='longString1']").text());
@@ -621,6 +739,12 @@ public class RenardeBackofficeTest {
                 + JavaExtensions.htmlNormalised(localDateTime.toLocalTime()) + "']").size());
         Assertions.assertEquals(1, document.select("input[name='timestamp'][type='datetime-local'][value='"
                 + JavaExtensions.htmlNormalised(localDateTime) + "']").size());
+        Assertions.assertEquals("A test comment",
+                document.select("input[name='commentedString'] ~ small.form-text").text());
+        Assertions.assertEquals("This field is required. A test comment",
+                document.select("input[name='commentedNotNull1String'] ~ small.form-text").text());
+        Assertions.assertEquals("This field is required. A test comment",
+                document.select("input[name='commentedNotNull2String'] ~ small.form-text").text());
 
         Elements oneToOneOwning = document.select("select[name='oneToOneOwning']");
         Assertions.assertEquals(1, oneToOneOwning.size());
@@ -682,8 +806,11 @@ public class RenardeBackofficeTest {
                 .multiPart("primitiveInt", "13")
                 .multiPart("wrapperInt", "13")
                 .multiPart("primitiveLong", "14")
+                .multiPart("wrapperLong", "14")
                 .multiPart("primitiveFloat", "15")
+                .multiPart("wrapperFloat", "15")
                 .multiPart("primitiveDouble", "16")
+                .multiPart("wrapperDouble", "16")
                 .multiPart("primitiveChar", "b")
                 .multiPart("string", "otherString")
                 .multiPart("requiredString", "otherString")
@@ -692,6 +819,8 @@ public class RenardeBackofficeTest {
                 .multiPart("longString2", "otherString")
                 .multiPart("longString3", "otherString")
                 .multiPart("longString4", "otherString")
+                .multiPart("commentedNotNull1String", "otherCommentedNotNull1String")
+                .multiPart("commentedNotNull2String", "otherCommentedNotNull2String")
                 .multiPart("enumeration", "A")
                 .multiPart("date", JavaExtensions.htmlNormalised(otherDate))
                 .multiPart("localDateTime", JavaExtensions.htmlNormalised(otherLocalDateTime))
@@ -726,8 +855,11 @@ public class RenardeBackofficeTest {
         Assertions.assertEquals(13, entity.primitiveInt);
         Assertions.assertEquals(13, entity.wrapperInt);
         Assertions.assertEquals(14, entity.primitiveLong);
+        Assertions.assertEquals(14, entity.wrapperLong);
         Assertions.assertEquals(15, entity.primitiveFloat);
+        Assertions.assertEquals(15, entity.wrapperFloat);
         Assertions.assertEquals(16, entity.primitiveDouble);
+        Assertions.assertEquals(16, entity.wrapperDouble);
         Assertions.assertEquals('b', entity.primitiveChar);
         Assertions.assertEquals(otherDate, entity.date);
         Assertions.assertEquals(otherLocalDateTime, entity.localDateTime);
@@ -741,6 +873,8 @@ public class RenardeBackofficeTest {
         Assertions.assertEquals("otherString", entity.longString2);
         Assertions.assertEquals("otherString", entity.longString3);
         Assertions.assertEquals("otherString", entity.longString4);
+        Assertions.assertEquals("otherCommentedNotNull1String", entity.commentedNotNull1String);
+        Assertions.assertEquals("otherCommentedNotNull2String", entity.commentedNotNull2String);
         Assertions.assertEquals(ExampleEnum.A, entity.enumeration);
         Assertions.assertEquals(oneToOnes.get(1).id, entity.oneToOneOwning.id);
         Assertions.assertEquals(oneToManys.get(1).id, entity.manyToOne.id);
@@ -774,6 +908,8 @@ public class RenardeBackofficeTest {
         given()
                 .when()
                 .multiPart("requiredString", "otherString")
+                .multiPart("commentedNotNull1String", "aCommentedNotNull1String")
+                .multiPart("commentedNotNull2String", "aCommentedNotNull2String")
                 .multiPart("arrayBlob$unset", "on")
                 .multiPart("sqlBlob$unset", "on")
                 .multiPart("namedBlob$unset", "on")
@@ -897,6 +1033,8 @@ public class RenardeBackofficeTest {
 
         ExampleEntity entity = new ExampleEntity();
         entity.requiredString = "aString";
+        entity.commentedNotNull1String = "aCommentedNotNull1String";
+        entity.commentedNotNull2String = "aCommentedNotNull2String";
         transact(() -> entity.persist());
 
         Assertions.assertEquals(1, ExampleEntity.count());
@@ -947,6 +1085,8 @@ public class RenardeBackofficeTest {
 
         ExampleEntity entity = new ExampleEntity();
         entity.requiredString = "aString";
+        entity.commentedNotNull1String = "aCommentedNotNull1String";
+        entity.commentedNotNull2String = "aCommentedNotNull2String";
         entity.arrayBlob = "Hello World".getBytes();
         entity.namedBlob = new NamedBlob("fu.txt", "text/plain", "Stef");
         transact(() -> entity.persist());

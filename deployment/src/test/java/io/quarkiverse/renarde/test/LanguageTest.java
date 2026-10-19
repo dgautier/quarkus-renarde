@@ -28,10 +28,11 @@ import io.quarkus.mailer.Mail;
 import io.quarkus.mailer.MailTemplate.MailTemplateInstance;
 import io.quarkus.mailer.MockMailbox;
 import io.quarkus.qute.CheckedTemplate;
+import io.quarkus.qute.Qute;
 import io.quarkus.qute.TemplateInstance;
 import io.quarkus.qute.i18n.Message;
 import io.quarkus.qute.i18n.MessageBundle;
-import io.quarkus.test.QuarkusUnitTest;
+import io.quarkus.test.QuarkusExtensionTest;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.restassured.RestAssured;
 import io.restassured.filter.cookie.CookieFilter;
@@ -40,7 +41,7 @@ import io.smallrye.mutiny.Uni;
 public class LanguageTest {
 
     @RegisterExtension
-    static final QuarkusUnitTest config = new QuarkusUnitTest()
+    static final QuarkusExtensionTest config = new QuarkusExtensionTest()
             .setArchiveProducer(() -> ShrinkWrap.create(JavaArchive.class)
                     .addClasses(MyController.class, MyBundle.class)
                     // Type-safe
@@ -67,6 +68,8 @@ public class LanguageTest {
                     .addAsResource(new StringAsset("{m:my_greeting}\n"
                             + "{m:params('STEF')}\n"
                             + "{m:my.greeting}\n"
+                            + "{m:my.greeting(0).toUpperCase}\n"
+                            + "{m:my.greeting.$render.toUpperCase}\n"
                             + "{m:'my.greeting.' + 'something'}\n"
                             + "{m:'my.greeting.' + val + \n '.something'}\n"
                             + "{m:'my.greeting.' + val +\n '.something'}\n"
@@ -193,14 +196,14 @@ public class LanguageTest {
                 .get("/type-unsafe").then()
                 .statusCode(200)
                 .body(Matchers.is(
-                        "english message\nenglish STEF message\nenglish message\nenglish message\nenglish message with code\nenglish message with code\nenglish STEF message\nmissing"));
+                        "english message\nenglish STEF message\nenglish message\nENGLISH MESSAGE\nENGLISH MESSAGE\nenglish message\nenglish message with code\nenglish message with code\nenglish STEF message\nmissing"));
         RestAssured
                 .given()
                 .cookie(I18N.LOCALE_COOKIE_NAME, "fr")
                 .get("/type-unsafe").then()
                 .statusCode(200)
                 .body(Matchers.is(
-                        "message français\nmessage STEF français\nmessage français\nmessage français\nmessage français avec code\nmessage français avec code\nmessage STEF français\nmissing"));
+                        "message français\nmessage STEF français\nmessage français\nMESSAGE FRANÇAIS\nMESSAGE FRANÇAIS\nmessage français\nmessage français avec code\nmessage français avec code\nmessage STEF français\nmissing"));
         // now try a missing language
         RestAssured
                 .given()
@@ -239,14 +242,24 @@ public class LanguageTest {
                 .post("/validation").then()
                 .statusCode(200)
                 .body(Matchers.is(
-                        "must not be empty"));
+                        "Required."));
         RestAssured
                 .given()
                 .cookie(I18N.LOCALE_COOKIE_NAME, "fr")
                 .post("/validation").then()
                 .statusCode(200)
                 .body(Matchers.is(
-                        "ne doit pas être vide"));
+                        "Ne doit pas être vide."));
+    }
+
+    @Test
+    public void testMissingMessageKey() {
+        RestAssured
+                .given()
+                .get("/message").then()
+                .statusCode(200)
+                .body(Matchers.is(
+                        "english message:english hello message:my_greeting_missing:my.params_missing:english message:english hello message:my_greeting_missing:my.params_missing"));
     }
 
     public static class MyController extends Controller {
@@ -312,6 +325,16 @@ public class LanguageTest {
         public String lang(@RestForm String l) {
             i18n.set(l);
             return i18n.getLanguage();
+        }
+
+        @Path("/message")
+        public String message() {
+            return "%s:%s:%s:%s:%s".formatted(
+                    Qute.engine().parse(
+                            "{m:my_greeting}:{m:my.params('hello')}:{m:my_greeting_missing}:{m:my.params_missing('hello')}")
+                            .render(),
+                    i18n.getMessage("my_greeting"), i18n.formatMessage("my.params", "hello"),
+                    i18n.getMessage("my_greeting_missing"), i18n.formatMessage("my.params_missing"));
         }
     }
 

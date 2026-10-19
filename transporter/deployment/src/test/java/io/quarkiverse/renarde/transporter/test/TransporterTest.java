@@ -1,6 +1,7 @@
 package io.quarkiverse.renarde.transporter.test;
 
 import java.net.URL;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
@@ -28,7 +29,7 @@ import com.jayway.jsonpath.PathNotFoundException;
 import io.quarkiverse.renarde.transporter.DatabaseTransporter;
 import io.quarkus.hibernate.orm.panache.PanacheEntity;
 import io.quarkus.hibernate.orm.panache.PanacheEntityBase;
-import io.quarkus.test.QuarkusUnitTest;
+import io.quarkus.test.QuarkusExtensionTest;
 import io.quarkus.test.common.http.TestHTTPResource;
 
 public class TransporterTest {
@@ -37,7 +38,7 @@ public class TransporterTest {
     private final static String USERS = "$['" + User.class.getName() + "']";
 
     @RegisterExtension
-    static final QuarkusUnitTest config = new QuarkusUnitTest()
+    static final QuarkusExtensionTest config = new QuarkusExtensionTest()
             .setArchiveProducer(() -> ShrinkWrap.create(JavaArchive.class)
                     .addClasses(Order.class, User.class)
                     .addAsManifestResource(EmptyAsset.INSTANCE, "beans.xml"));
@@ -73,9 +74,11 @@ public class TransporterTest {
         Assertions.assertEquals(1, importedOrders.get(0).id);
         Assertions.assertEquals("a", importedOrders.get(0).name);
         Assertions.assertEquals(orders.get(0).date, importedOrders.get(0).date);
+        Assertions.assertEquals(orders.get(0).instant, importedOrders.get(0).instant);
         Assertions.assertEquals(2, importedOrders.get(1).id);
         Assertions.assertEquals("b", importedOrders.get(1).name);
         Assertions.assertEquals(orders.get(1).date, importedOrders.get(1).date);
+        Assertions.assertEquals(orders.get(1).instant, importedOrders.get(1).instant);
 
         @SuppressWarnings("unchecked")
         List<User> importedUsers = (List<User>) imported.get(User.class);
@@ -183,6 +186,9 @@ public class TransporterTest {
         public User one;
 
         public Date date;
+        public Instant instant;
+
+        public boolean booleanPrimitive;
 
         public Order() {
         }
@@ -191,6 +197,7 @@ public class TransporterTest {
             this.id = id;
             this.name = name;
             this.date = new Date();
+            this.instant = date.toInstant();
         }
     }
 

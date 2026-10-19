@@ -1,8 +1,8 @@
 package io.quarkiverse.renarde.jpa.deployment;
 
-import java.lang.annotation.Annotation;
 import java.sql.Types;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map.Entry;
 
@@ -11,6 +11,7 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
 import jakarta.persistence.Lob;
 import jakarta.persistence.ManyToMany;
 import jakarta.persistence.ManyToOne;
@@ -18,12 +19,15 @@ import jakarta.persistence.MappedSuperclass;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.OneToOne;
 import jakarta.persistence.Transient;
+import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 import org.hibernate.validator.constraints.Length;
+import org.hibernate.validator.constraints.URL;
 import org.jboss.jandex.AnnotationInstance;
 import org.jboss.jandex.AnnotationValue;
 import org.jboss.jandex.ClassInfo;
@@ -63,6 +67,7 @@ public class ModelField {
     private static final DotName DOTNAME_ONETOONE = DotName.createSimple(OneToOne.class.getName());
     private static final DotName DOTNAME_ENUMERATED = DotName.createSimple(Enumerated.class.getName());
     private static final DotName DOTNAME_COLUMN = DotName.createSimple(Column.class.getName());
+    private static final DotName DOTNAME_JOIN_COLUMN = DotName.createSimple(JoinColumn.class.getName());
     private static final DotName DOTNAME_LENGTH = DotName.createSimple(Length.class.getName());
     private static final DotName DOTNAME_SIZE = DotName.createSimple(Size.class.getName());
     private static final DotName DOTNAME_JDBC_TYPE_CODE = DotName.createSimple(JdbcTypeCode.class.getName());
@@ -73,6 +78,10 @@ public class ModelField {
     private static final DotName DOTNAME_ENTITY = DotName.createSimple(Entity.class.getName());
     private static final DotName DOTNAME_MAPPED_SUPERCLASS = DotName.createSimple(MappedSuperclass.class.getName());
     private static final DotName DOTNAME_GENERATED_VALUE = DotName.createSimple(GeneratedValue.class.getName());
+    private static final DotName DOTNAME_NOT_NULL = DotName.createSimple(NotNull.class.getName());
+    private static final DotName DOTNAME_NOT_EMPTY = DotName.createSimple(NotEmpty.class.getName());
+    private static final DotName DOTNAME_NOT_BLANK = DotName.createSimple(NotBlank.class.getName());
+    private static final DotName DOTNAME_URL = DotName.createSimple(URL.class.getName());
     public static final String NAMED_BLOB_DESCRIPTOR = "L" + NamedBlob.class.getName().replace('.', '/') + ";";
 
     // For views
@@ -84,11 +93,12 @@ public class ModelField {
     public long min, max;
     public double step;
     public String help;
+    public boolean required;
 
     // For processor
     public EntityField entityField;
     public EntityField inverseField;
-    public List<Class<? extends Annotation>> validation = new ArrayList<>();
+    public List<AnnotationInstance> validation = new ArrayList<>();
     // use this rather than EntitiField.signature which is set later (why?)
     public String signature;
     public boolean relationOwner;
@@ -104,6 +114,7 @@ public class ModelField {
         this.signature = field.genericSignature();
         AnnotationInstance oneToOne = field.annotation(DOTNAME_ONETOONE);
         AnnotationInstance column = field.annotation(DOTNAME_COLUMN);
+        AnnotationInstance notNull = field.annotation(DOTNAME_NOT_NULL);
         AnnotationInstance jdbcTypeCode = field.annotation(DOTNAME_JDBC_TYPE_CODE);
         this.id = field.annotation(DOTNAME_ID) != null;
         this.generatedValue = field.annotation(DOTNAME_GENERATED_VALUE) != null;
@@ -136,11 +147,10 @@ public class ModelField {
             this.type = Type.Text;
             min = 1;
             max = 1;
-        } else if (entityField.descriptor.equals("D")) {
-            this.type = Type.Number;
-            // this allows floats in number fields
-            step = 0.00001;
-        } else if (entityField.descriptor.equals("F")) {
+        } else if (entityField.descriptor.equals("D")
+                || entityField.descriptor.equals("Ljava/lang/Double;")
+                || entityField.descriptor.equals("F")
+                || entityField.descriptor.equals("Ljava/lang/Float;")) {
             this.type = Type.Number;
             // this allows floats in number fields
             step = 0.00001;
@@ -169,7 +179,8 @@ public class ModelField {
                 this.type = Type.Text;
             }
         } else if (entityField.descriptor.equals("Ljava/util/Date;")
-                || entityField.descriptor.equals("Ljava/time/LocalDateTime;")) {
+                || entityField.descriptor.equals("Ljava/time/LocalDateTime;")
+                || entityField.descriptor.equals("Ljava/time/Instant;")) {
             this.type = Type.DateTimeLocal;
         } else if (entityField.descriptor.equals("Ljava/time/LocalDate;")) {
             this.type = Type.Date;
@@ -215,10 +226,6 @@ public class ModelField {
                         }
                     }
                 }
-                if (this.inverseField == null) {
-                    throw new RuntimeException(
-                            "Failed to find owning side of @ManyToMany from " + field + " in relation type " + relationClass);
-                }
                 this.relationOwner = true;
             }
             FieldInfo relationIdField = findRelationIdField(relationClass, index);
@@ -248,11 +255,51 @@ public class ModelField {
                 }
             }
         }
-        if (column != null && column.value("nullable") != null && !column.value("nullable").asBoolean()) {
-            validation.add(NotEmpty.class);
-            help = "This field is required";
+        this.help = "";
+        AnnotationInstance joinColumn = field.annotation(DOTNAME_JOIN_COLUMN);
+        boolean requiredAdded = false;
+        // all of those are passed as strings, and the "(none)" choice is an empty string, so turn them into a @NotBlank
+        if ((column != null && column.value("nullable") != null && !column.value("nullable").asBoolean())
+                || (joinColumn != null && joinColumn.value("nullable") != null && !joinColumn.value("nullable").asBoolean())
+                        && !field.hasAnnotation(DOTNAME_NOT_BLANK)) {
+            validation.add(AnnotationInstance.create(DOTNAME_NOT_BLANK, null, Collections.emptyList()));
+            help += "This field is required. ";
+            required = true;
+            requiredAdded = true;
+        }
+        for (DotName supportedValidationAnnotation : new DotName[] { DOTNAME_NOT_EMPTY, DOTNAME_NOT_NULL, DOTNAME_NOT_BLANK,
+                DOTNAME_SIZE, DOTNAME_LENGTH, DOTNAME_URL }) {
+            if (field.hasAnnotation(supportedValidationAnnotation)) {
+                AnnotationInstance value = field.annotation(supportedValidationAnnotation);
+                validation.add(value);
+                if (supportedValidationAnnotation == DOTNAME_NOT_EMPTY
+                        || supportedValidationAnnotation == DOTNAME_NOT_NULL
+                        || supportedValidationAnnotation == DOTNAME_NOT_BLANK) {
+                    // don't add it twice
+                    required = true;
+                    if (!requiredAdded) {
+                        help += "This field is required. ";
+                        requiredAdded = true;
+                    }
+                } else if (supportedValidationAnnotation == DOTNAME_URL) {
+                    help += "This field must be a URL. ";
+                } else if (supportedValidationAnnotation == DOTNAME_SIZE
+                        || supportedValidationAnnotation == DOTNAME_LENGTH) {
+                    help += "This field must be between " + withDefault(value.value("min"), 0) + " and "
+                            + withDefault(value.value("max"), Integer.MAX_VALUE) + " characters. ";
+                }
+            }
+        }
+        if (column != null && column.value("comment") != null && !column.value("comment").asString().isBlank()) {
+            help += column.value("comment").asString();
         }
         this.entityField = entityField;
+    }
+
+    private <T> T withDefault(AnnotationValue value, T def) {
+        if (value == null)
+            return def;
+        return (T) value.value();
     }
 
     private FieldInfo findRelationIdField(String relationClass, IndexView index) {

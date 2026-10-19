@@ -59,7 +59,7 @@ public class I18N {
 
     private Locale findSupportedLocale(String language) {
         // FIXME: simplistic
-        for (Locale locale : localesConfig.locales) {
+        for (Locale locale : localesConfig.locales()) {
             if (locale.getLanguage().equals(language)) {
                 return locale;
             }
@@ -93,7 +93,7 @@ public class I18N {
      * @return the current locale, as obtained via a cookie override, or HTTP headers, or the default.
      */
     public Locale getLocale() {
-        return locale != null ? locale : localesConfig.defaultLocale;
+        return locale != null ? locale : localesConfig.defaultLocale().orElse(Locale.getDefault());
     }
 
     void readLanguageCookie(ResteasyReactiveContainerRequestContext requestContext) {
@@ -116,13 +116,13 @@ public class I18N {
             }
             // do we support it?
             // FIXME: perhaps only look at the primary language?
-            if (localesConfig.locales.contains(acceptableLanguage)) {
+            if (localesConfig.locales().contains(acceptableLanguage)) {
                 locale = acceptableLanguage;
                 return;
             }
         }
         // we didn't find any match between our locales and the user's so → default value
-        locale = localesConfig.defaultLocale;
+        locale = localesConfig.defaultLocale().orElse(Locale.getDefault());
     }
 
     void setLanguageCookie() {
@@ -137,11 +137,16 @@ public class I18N {
     }
 
     public String getMessage(String key) {
-        return renardeConfig.getMessage(get(), key);
+        String message = message(key);
+        return message != null ? message : key;
     }
 
     public String formatMessage(String key, Object... params) {
-        String message = getMessage(key);
+        String message = message(key);
         return message != null ? String.format(message, params) : key;
+    }
+
+    private String message(String key) {
+        return renardeConfig.getMessage(getLanguage(), key);
     }
 }

@@ -41,11 +41,13 @@ Creating forms in Renarde is easy: let's see an example of how to do it in Qute:
 {/form}
 ----
 
-Here we're defining a form whose action will go to `Register.complete(newUser.confirmationCode)` and
-which contains several form elements, which are just tags to make composition easier. For example `formElement` is
-a custom Qute tag for Bootstrap which defines layout for the form element and displays any associated error:
+Here we're defining a form whose action will go to `Login.complete(newUser.confirmationCode)` and
+which contains several form elements, which are just tags to make composition easier.
+
+For example `formElement` is a custom Qute tag (see xref:concepts.adoc#_user_tags[User tags]) for Bootstrap which defines layout for the form element and displays any associated error:
 
 [source,html]
+.content of the `templates/tags/formElement.html` file
 ----
 <div class="mb-3">
     <label class="form-label" for="{name}">{label}</label>
@@ -59,6 +61,7 @@ a custom Qute tag for Bootstrap which defines layout for the form element and di
 The `input` user tag is also designed for Bootstrap as an abstraction:
 
 [source,html]
+.content of the `templates/tags/input.html` file
 ----
 <input name="{name}"
  type="{type ?: 'text'}"
@@ -72,7 +75,7 @@ As you can see, we have default values for certain attributes, a special error c
 error, and we default the value to the one preserved in the flash scope, which is filled whenever validation
 fails, so that the user can see the validation error without losing their form values.
 
-As for the `form` Renarde tag, it is also fairly simple, and only includes an authenticity token for CSRF protection.
+As for the `form` xref:concepts.adoc#_renarde_tags[Renarde tag], it is also fairly simple, and only includes an authenticity token for CSRF protection.
 
 [source,html]
 ----
@@ -120,10 +123,12 @@ public static class FormData {
 }
 ----
 
-Check out the {quarkus-guides-url}/resteasy-reactive#handling-multipart-form-data[RESTEasy Reactive documentation]
+Check out the {quarkus-guides-url}/rest#multipart[Quarkus REST documentation]
 for more information about form parameters and multi-part.
 
 === Validation
+
+Note: This only applies to Renarde Controllers (not to regular non-Renarde REST endpoints).
 
 You can place your usual {quarkus-guides-url}/validation[Hibernate Validation] annotations on the controller methods that receive user data, but
 keep in mind that you have to check for validation errors in your method before you do any action that modifies your state.
@@ -347,8 +352,8 @@ Naturally, you can also pass any required parameters.
 </dependency>
 ----
 
-Often you will need your actions to send email notifications.You can use Qute for this too, by declaring your
-emails in an `Emails` class:
+Often you will need your actions to send email notifications.
+You can use Qute for this too, by declaring your emails in an `Emails` class:
 
 [source,java]
 ----
@@ -518,6 +523,20 @@ With parameters:
 {m:views_Application_index_greet(name)}
 ----
 
+NOTE: If you need to pass your localised message to another qute tag, or you need to invoke `String` methods on the
+rendered message, you can force the rendering of your message to a `String` by passing it parameters, such as in the
+previous example with `m:views_Application_index_greet(name)` but if your message does not require parameters you
+can force the rendering with the `$render` method:
+
+[source,txt]
+----
+This will be rendered in your document:
+{m:hello}
+But if you need to turn it into a String in your template expression, to pass it to a Qute tag, or to invoke String
+methods such as toUpperCase, you can use $render to render your message into a String:
+{m:hello.$render.toUpperCase}
+----
+
 === Selecting the language
 
 The current language for a request will depend on the following (in order):
@@ -626,6 +645,7 @@ Alternatively, you can use `hx-headers` on the <body> to make all hx requests se
 ----
 
 Some example projects with Quarkus Renarde and htmx:
+
 - https://github.com/ia3andy/renotes[a demo note-taking web app]
 - https://github.com/ia3andy/quarkus-blast[a board game]
 
@@ -759,6 +779,88 @@ to set things like document page size, odd/even page margins, etc…:
 ----
 
 Note that the default page size is https://en.wikipedia.org/wiki/ISO_216#A_series[A4].
+
+=== Generating images
+
+The best way to generate dynamic images is using Qute templating to render HTML with CSS. Just like for PDF, this is
+simply the easiest way to develop your graphics (using the HTML rendering and browser debug tools) and maintain your
+graphics.
+
+To generate an image, it is exactly the same setup as generating a PDF, except you mark your endpoint as producing
+a PNG:
+
+[source,java]
+----
+public class Application extends Controller {
+
+    @CheckedTemplate
+    public static class Templates {
+        public static native TemplateInstance page();
+    }
+
+    // This will return a PNG file to the caller
+    @Produces(Pdf.IMAGE_PNG)
+    public TemplateInstance png() {
+        return Templates.page();
+    }
+
+    // This will return HTML to the caller
+    public TemplateInstance html() {
+        return Templates.page();
+    }
+}
+----
+
+=== Caveats of HTML rendering and limitations
+
+https://github.com/danfickle/openhtmltopdf[OpenHTMLToPDF], the engine behind the magic, is based on the
+https://github.com/flyingsaucerproject/flyingsaucer[Flying Saucer engine]. It is *not* a browser and never pretends
+to be one. That’s why some designs render beautifully in your browser but fall apart when converted to PDF or PNG.
+
+==== Limited CSS Support
+
+Only CSS 2.1 and a few CSS3 properties are supported.
+The following will not work:
+
+- Flexbox
+- CSS Grid
+- Animations and transitions
+- CSS transforms (`rotate`, `scale`, `translate`)
+- Modern filters (`blur`, `drop-shadow`, `backdrop-filter`)
+- Advanced selectors and pseudo-classes
+
+==== No JavaScript
+
+Anything you generate or animate with JavaScript will be ignored.
+
+==== Partial Transparency
+
+- Effects like:
+- `rgba()`
+- partial opacity
+- semi-transparent shadows
+
+…may look wrong or not render at all.
+
+==== Font Restrictions
+
+- Only `.ttf` fonts are supported.
+- `.otf` files will be ignored, and fallback fonts are limited.
+
+==== Layout Techniques
+
+Browser-era layout systems don’t work here.
+Use:
+
+- tables
+- block-level flow
+- absolute positioning
+
+==== Limited Effects
+
+- Complex `linear-gradient()` or `radial-gradient()` may not appear
+- Shadows with transparency may get flattened
+- Decorative effects might degrade
 
 == Backoffice
 
